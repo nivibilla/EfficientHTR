@@ -58,32 +58,40 @@ def binary_classification_metrics(gt_aabbs, pred_aabbs):
     return BinaryClassificationMetrics(tp, fp, fn)
 
 
-def evaluate(processedImg, net, device, thres=0.5, max_aabbs=None):
+def evaluate(net, loader, thres=0.5, max_aabbs=None):
     batch_imgs = []
     batch_aabbs = []
     loss = 0
 
-    with torch.no_grad():
-        # loader_item.batch_imgs = torch.from_numpy(processedImg).to(self.device)
-        imgTensor = torch.from_numpy(processedImg).to(device)
-        y = net(imgTensor, apply_softmax=True)
-        y_np = y.to('cpu').numpy()
+    for i in range(len(loader)):
+        # get batch
+        loader_item = loader[i]
+        with torch.no_grad():
+            # loader_item.batch_imgs = torch.from_numpy(processedImg).to(self.device)
+            y = net(loader_item.batch_imgs, apply_softmax=True)
+            y_np = y.to('cpu').numpy()
+            if loader_item.batch_gt_maps is not None:
+                loss += compute_loss(y, loader_item.batch_gt_maps).to('cpu').numpy()
 
-    scale_up = 1 / compute_scale_down(WordDetectorNet.input_size, WordDetectorNet.output_size)
-    metrics = BinaryClassificationMetrics(0, 0, 0)
+        scale_up = 1 / compute_scale_down(WordDetectorNet.input_size, WordDetectorNet.output_size)
+        metrics = BinaryClassificationMetrics(0, 0, 0)
+        for i in range(len(y_np)):
+            img_np = loader_item.batch_imgs[i, 0].to('cpu').numpy() # Actual processed image
+            pred_map = y_np[i] # processed image mapped to net
 
-    img_np = imgTensor[0, 0].to('cpu').numpy() # Actual processed image
-    pred_map = y_np[0] # processed image mapped to net
+            aabbs = decode(pred_map, comp_fg=fg_by_cc(thres, max_aabbs), f=scale_up)
+            h, w = img_np.shape
+            aabbs = [aabb.clip(AABB(0, w - 1, 0, h - 1)) for aabb in aabbs]  # bounding box must be inside img
+            clustered_aabbs = cluster_aabbs(aabbs)
 
-    aabbs = decode(pred_map, comp_fg=fg_by_cc(thres, max_aabbs), f=scale_up)
-    h, w = img_np.shape
-    aabbs = [aabb.clip(AABB(0, w - 1, 0, h - 1)) for aabb in aabbs]  # bounding box must be inside img
-    clustered_aabbs = cluster_aabbs(aabbs)
+            if loader_item.batch_aabbs is not None:
+                curr_metrics = binary_classification_metrics(loader_item.batch_aabbs[i], clustered_aabbs)
+                metrics = metrics.accumulate(curr_metrics)
 
-    batch_imgs.append(img_np)
-    batch_aabbs.append(clustered_aabbs)
+            batch_imgs.append(img_np)
+            batch_aabbs.append(clustered_aabbs)
 
-    return img_np, clustered_aabbs
+    return EvaluateRes(batch_imgs, batch_aabbs, loss / len(loader), metrics)
 
 
 def main():
